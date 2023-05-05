@@ -1,15 +1,20 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
 
-
 #include <winsock2.h>
 #include <windows.h>
 #include <ws2tcpip.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#pragma comment(lib, "ws2_32.lib")  // link with Winsock library
+#pragma comment(lib, "ws2_32.lib")
 
+#define PACKET_SIZE 1024
+
+typedef struct {
+    int seqNum;
+    char data[PACKET_SIZE];
+} Packet;
 
 int main() {
     WSADATA wsa;
@@ -17,8 +22,6 @@ int main() {
     struct sockaddr_in si_other;
     int slen = sizeof(si_other);
     unsigned long noBlock;
-    
-
 
     printf("\n****** INITIALIZING WINSOCK ***********");
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
@@ -29,8 +32,8 @@ int main() {
 
     /**file variable **/
     unsigned long fileLen; // length of image file
-    FILE *fp; // file pointer
-    char *buffer; // pointer to character array
+    FILE* fp; // file pointer
+    char* buffer; // pointer to character array
     /*** OPEN IMAGE FILE AND COPY TO DATA STRUCTURE ***/
     fp = fopen("C:\\Users\\timil\\Downloads\\test.jpg", "rb");
     if (fp == NULL) {
@@ -44,7 +47,7 @@ int main() {
     fileLen = ftell(fp); // determine length
     fseek(fp, 0, SEEK_SET); //reset fp
     buffer = (char*)malloc(fileLen + 1); //allocated memory
-    
+
     if (!buffer) {
         printf("\n memory error allocating buffer");
         fclose(fp);
@@ -52,7 +55,7 @@ int main() {
     }
 
     /********* READ FILE DATA INTO BUFFER AND CLOSE FILE *************/
-    fread(buffer, fileLen, 1, fp);
+    fread(buffer, 1, fileLen, fp);
     fclose(fp);
 
     /***** CREATE CLIENT SOCKET ****/
@@ -60,6 +63,7 @@ int main() {
         printf("Could not create socket : %d", WSAGetLastError());
     }
     printf("\nUDP CLIENT SOCKET CREATED.");
+
     /***** INITIALIZE SOCKET STRUCT - Non Blocking Client ****/
     noBlock = 1;
     ioctlsocket(s, FIONBIO, &noBlock);
@@ -67,10 +71,52 @@ int main() {
     si_other.sin_family = AF_INET;
     si_other.sin_port = htons(80);
 
-    if (sendto(s, buffer, sizeof(buffer), 0, (struct sockaddr*) &si_other, slen) == SOCKET_ERROR) {
-        printf("sendto() failed with error code : %d", WSAGetLastError());
-        exit(EXIT_FAILURE);
-    }
-    else printf("\nsent buffer");
+    /***** SEND PACKETS ****/
+    int NumPackets = (fileLen + PACKET_SIZE - 1) / PACKET_SIZE;
+    int seqNum = 0;
+    for (int i = 0; i < NumPackets; i++) {
+        Packet packet;
+        packet.seqNum = seqNum;
+        int packetSize = PACKET_SIZE;
+        if (i == NumPackets - 1) { //last packet may not be full packet size
+            packetSize = fileLen % PACKET_SIZE;
+        }
+        memcpy(packet.data, &buffer[i * PACKET_SIZE], packetSize); //copy packet data from buffer
+        if (sendto(s, (char*)&packet, packetSize + sizeof(int), 0, (struct sockaddr*)&si_other, slen) == SOCKET_ERROR) {
+            printf("sendto() failed with error code : %d", WSAGetLastError());
+            exit(EXIT_FAILURE);
+        }
+        printf("Packet %d of %d sent\n", seqNum, NumPackets);
 
+        int ACK = 0;
+        while (ACK == 0) {
+            Packet ackPacket;
+            int ackSize = recvfrom(s, (char*)&ackPacket, sizeof(ackPacket), 0, (struct sockaddr*)&si_other, &slen);
+            if (ackSize == SOCKET_ERROR) {
+                int errorCode = WSAGetLastError();
+                if (errorCode == WSAEWOULDBLOCK || errorCode == WSAECONNRESET) {
+                    // No data available to be received yet, continue loop
+                    continue;
+                }
+                else {
+                    printf("recvfrom() failed with error code : %d", errorCode);
+                    exit(EXIT_FAILURE);
+                }
+            }
+            else if (ackSize == sizeof(int) && ackPacket.seqNum == seqNum) {
+                printf("ACK %d received\n", seqNum);
+                seqNum++;
+                ACK = 1;
+            }
+        }
+        ACK = 0; // reset ACK back to false
+
+    }
+    printf("\nAll packets sent.");
+
+    // Cleanup
+    closesocket(s);
+    WSACleanup();
+
+    return 0;
 }
